@@ -38,9 +38,9 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Пробуем модель gemini-2.5-flash-lite (она стабильнее и не имеет такой дикой очереди, как 3.8)
+    // Используем актуальную модель gemini-3.5-flash-lite, которую требует Google
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -69,7 +69,7 @@ module.exports = async (req, res) => {
         version,
         session: body.session,
         response: {
-          text: `Google занят (${data.error.message}). Повторите вопрос через пару секунд.`,
+          text: `Google: ${data.error.message}`,
           end_session: false
         }
       });
@@ -103,7 +103,7 @@ module.exports = async (req, res) => {
       version: req.body?.version || "1.0",
       session: req.body?.session,
       response: {
-        text: "Нейросеть думает чуть дольше обычного. Спросите еще раз.",
+        text: `Сбой сервера: ${err.message}`,
         end_session: false
       }
     });
