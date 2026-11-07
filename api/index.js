@@ -1,53 +1,87 @@
-// Глобальный кеш в оперативной памяти сервера (живет между быстрыми запросами)
 const cache = new Map();
 
-// Функция обращения к Gemini без жесткого обрыва соединения
-async function askGemini(promptText, apiKey) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
+// Список актуальных моделей: от самых быстрых и легких к основным
+const MODELS = [
+  "gemini-3.8-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash"
+];
+
+async function askGeminiWithFallback(promptText, apiKey) {
+  let lastError = "";
+
+  // Проходим по списку моделей, пока одна из них не ответит без ошибки перегрузки
+  for (const model of MODELS) {
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
               {
-                text: `Ответь кратко (1-2 предложения), на русском, для чтения вслух без спецсимволов: ${promptText}`
+                parts: [
+                  {
+                    text: `Ответь кратко (1-2 предложения), на русском, для чтения вслух без спецсимволов: ${promptText}`
+                  }
+                ]
               }
-            ]
-          }
-        ],
-        generationConfig: {
-          maxOutputTokens: 90,
-          temperature: 0.6,
-          thinkingConfig: {
-            thinkingBudget: 0
-          }
+            ],
+            generationConfig: {
+              maxOutputTokens: 90,
+              temperature: 0.6
+            }
+          })
         }
-      })
+      );
+
+      const data = await response.json();
+
+      // Если эта модель не найдена (404) или перегружена (503 / high demand) — сразу пробуем следующую
+      if (data.error) {
+        lastError = data.error.message || JSON.stringify(data.error);
+        continue;
+      }
+
+      if (data.candidates?.[0]?.content?.parts) {
+        const parts = data.candidates[0].content.parts;
+        const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
+        let reply = (textPart ? textPart.text : "").replace(/[*#_`]/g, "").trim();
+
+        if (reply) {
+          if (reply.length > 950) reply = reply.slice(0, 950) + "...";
+          return reply;
+        }
+      }
+    } catch (err) {
+      lastError = err.message;
+      continue;
     }
-  );
-
-  const data = await response.json();
-
-  if (data.error) {
-    return `Ошибка Google: ${data.error.message}`;
   }
 
-  if (data.candidates?.[0]?.content?.parts) {
-    const parts = data.candidates[0].content.parts;
-    const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
-    let reply = (textPart ? textPart.text : "Пустой ответ от модели.").replace(/[*#_`]/g, "").trim();
-    if (reply.length > 950) reply = reply.slice(0, 950) + "...";
-    return reply;
-  }
+  // Если с первого круга все модели заняты, ждем 1 секунду и делаем контрольный запрос к 3.8-flash
+  await new Promise(r => setTimeout(r, 1000));
+  try {
+    const retryResp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: `Ответь одним предложением на русском: ${promptText}` }] }],
+          generationConfig: { maxOutputTokens: 80 }
+        })
+      }
+    );
+    const retryData = await retryResp.json();
+    if (retryData.candidates?.[0]?.content?.parts) {
+      const parts = retryData.candidates[0].content.parts;
+      const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
+      if (textPart?.text) return textPart.text.replace(/[*#_`]/g, "").trim();
+    }
+  } catch (e) {}
 
-  return "Не удалось разобрать ответ нейросети.";
+  return `Сервера Google сейчас перегружены (${lastError}). Попробуйте через минуту.`;
 }
 
 module.exports = async (req, res) => {
-  // 1. Технические пинги и запуск навыка
   if (!req.body || !req.body.request) {
     return res.status(200).json({
       version: "1.0",
@@ -88,7 +122,6 @@ module.exports = async (req, res) => {
   const isFollowUp = ["дальше", "готово", "ну что", "продолжай", "ответ", "да", "ага"].includes(lowerText);
   const existingTask = cache.get(sessionId);
 
-  // 2. Если пользователь просит дослушать отложенный ответ ("дальше")
   if (isFollowUp && existingTask) {
     if (existingTask.status === "done") {
       cache.delete(sessionId);
@@ -101,7 +134,6 @@ module.exports = async (req, res) => {
         }
       });
     } else {
-      // Если ответ еще доделывается, ждем его еще до 2.2 сек
       const timeoutPromise = new Promise(resolve => setTimeout(() => resolve("TIMEOUT"), 2200));
       const result = await Promise.race([existingTask.promise, timeoutPromise]);
 
@@ -121,65 +153,18 @@ module.exports = async (req, res) => {
         version: req.body.version,
         session: req.body.session,
         response: {
-          text: "Еще буквально секунду, скажите: дальше.",
+          text: "Сервер Google сильно загружен, еще дожимаю ответ... Нажмите «Дальше».",
+          buttons: [{ title: "Дальше", hide: true }],
           end_session: false
         }
       });
     }
   }
 
-  // 3. Запускаем новый запрос к Gemini
   const taskRecord = { status: "pending", reply: null, promise: null };
 
-  const geminiPromise = askGemini(userText, apiKey)
+  const geminiPromise = askGeminiWithFallback(userText, apiKey)
     .then(reply => {
       taskRecord.status = "done";
       taskRecord.reply = reply;
       return reply;
-    })
-    .catch(err => {
-      const errText = `Сбой связи: ${err.message}`;
-      taskRecord.status = "done";
-      taskRecord.reply = errText;
-      return errText;
-    });
-
-  taskRecord.promise = geminiPromise;
-  cache.set(sessionId, taskRecord);
-
-  // Не даем Vercel "убить" фоновый процесс после отправки промежуточного ответа Яндексу
-  try {
-    const { waitUntil } = require("@vercel/functions");
-    if (waitUntil) waitUntil(geminiPromise);
-  } catch (e) {
-    // В стандартной среде Node на Vercel промис продолжает жить в теплом инстансе
-  }
-
-  // Гонка: ждем ответ от Google максимум 2.35 секунды
-  const timeoutPromise = new Promise(resolve => setTimeout(() => resolve("TIMEOUT"), 2350));
-  const raceResult = await Promise.race([geminiPromise, timeoutPromise]);
-
-  // Вариант А: Нейросеть успела ответить за 2.35 сек — отдаем ответ сразу!
-  if (raceResult !== "TIMEOUT") {
-    cache.delete(sessionId);
-    return res.status(200).json({
-      version: req.body.version,
-      session: req.body.session,
-      response: {
-        text: raceResult,
-        end_session: false
-      }
-    });
-  }
-
-  // Вариант Б: Нейросеть думает дольше 2.35 сек — успокаиваем Яндекс, а ответ дозревает в фоне
-  return res.status(200).json({
-    version: req.body.version,
-    session: req.body.session,
-    response: {
-      text: "Генерирую ответ... Скажите «дальше» через секунду.",
-      buttons: [{ title: "Дальше", hide: true }],
-      end_session: false
-    }
-  });
-};
