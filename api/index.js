@@ -2,7 +2,6 @@ module.exports = async (req, res) => {
   try {
     const body = req.body || {};
     
-    // Технический пинг от Яндекса при открытии навыка
     if (!body.request) {
       return res.status(200).json({
         version: "1.0",
@@ -39,9 +38,9 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Используем самую быструю и стабильную модель без очередей
+    // Запрос к актуальной модели 3.8-flash с отключенным thinking для скорости
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -56,8 +55,11 @@ module.exports = async (req, res) => {
             }
           ],
           generationConfig: {
-            maxOutputTokens: 100,
-            temperature: 0.7
+            maxOutputTokens: 80,
+            temperature: 0.7,
+            thinkingConfig: {
+              thinkingBudget: 0
+            }
           }
         })
       }
