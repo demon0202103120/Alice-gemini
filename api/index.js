@@ -1,5 +1,5 @@
 module.exports = async (req, res) => {
-  // Проверка на пустые запросы или технические пинги от Яндекса
+  // Проверка на пустые запросы или пинги от Яндекса
   if (!req.body || !req.body.request) {
     return res.status(200).json({
       version: "1.0",
@@ -25,8 +25,19 @@ module.exports = async (req, res) => {
     });
   }
 
+  // Проверка наличия ключа в переменных окружения
+  if (!apiKey) {
+    return res.status(200).json({
+      version: req.body.version,
+      session: req.body.session,
+      response: {
+        text: "Ошибка: переменная GEMINI_API_KEY не задана в настройках Vercel.",
+        end_session: false
+      }
+    });
+  }
+
   try {
-    // Обращение к быстрой модели, чтобы успеть ответить Алисе за 3 секунды
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
@@ -41,20 +52,36 @@ module.exports = async (req, res) => {
                 }
               ]
             }
-          ]
+          ],
+          generationConfig: {
+            thinkingConfig: {
+              thinkingBudget: 0
+            }
+          }
         })
       }
     );
 
     const data = await response.json();
-    let reply =
-      data.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "Не удалось получить ответ от нейросети.";
 
-    // Очищаем текст от разметки Markdown, чтобы Алиса не читала спецсимволы
+    let reply = "";
+
+    // Если Google вернул ошибку — выводим ее текст для диагностики
+    if (data.error) {
+      reply = `Ошибка Google: ${data.error.message || JSON.stringify(data.error)}`;
+    } else if (data.candidates?.[0]?.content?.parts) {
+      // Ищем часть с текстом (исключая технические мысли thinking)
+      const parts = data.candidates[0].content.parts;
+      const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
+      reply = textPart ? textPart.text : "Ответ от нейросети пуст.";
+    } else {
+      reply = `Неожиданный ответ Google: ${JSON.stringify(data).slice(0, 200)}`;
+    }
+
+    // Очищаем текст от разметки Markdown
     reply = reply.replace(/[*#_`]/g, "");
 
-    // Обрезаем ответ, если он превышает лимит Яндекс Диалогов
+    // Обрезаем ответ под лимит Яндекс Диалогов (1000 символов)
     if (reply.length > 950) {
       reply = reply.slice(0, 950) + "...";
     }
@@ -72,7 +99,7 @@ module.exports = async (req, res) => {
       version: req.body.version,
       session: req.body.session,
       response: {
-        text: "Произошла ошибка при связи с Gemini.",
+        text: `Сбой сервера: ${err.message}`,
         end_session: false
       }
     });
