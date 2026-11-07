@@ -1,5 +1,53 @@
+// Глобальный кеш в оперативной памяти сервера (живет между быстрыми запросами)
+const cache = new Map();
+
+// Функция обращения к Gemini без жесткого обрыва соединения
+async function askGemini(promptText, apiKey) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: `Ответь кратко (1-2 предложения), на русском, для чтения вслух без спецсимволов: ${promptText}`
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          maxOutputTokens: 90,
+          temperature: 0.6,
+          thinkingConfig: {
+            thinkingBudget: 0
+          }
+        }
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (data.error) {
+    return `Ошибка Google: ${data.error.message}`;
+  }
+
+  if (data.candidates?.[0]?.content?.parts) {
+    const parts = data.candidates[0].content.parts;
+    const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
+    let reply = (textPart ? textPart.text : "Пустой ответ от модели.").replace(/[*#_`]/g, "").trim();
+    if (reply.length > 950) reply = reply.slice(0, 950) + "...";
+    return reply;
+  }
+
+  return "Не удалось разобрать ответ нейросети.";
+}
+
 module.exports = async (req, res) => {
-  // Пинги и пустые вызовы от Яндекса
+  // 1. Технические пинги и запуск навыка
   if (!req.body || !req.body.request) {
     return res.status(200).json({
       version: "1.0",
@@ -10,10 +58,11 @@ module.exports = async (req, res) => {
     });
   }
 
-  const userText = req.body.request.command || req.body.request.original_utterance;
+  const userText = (req.body.request.command || req.body.request.original_utterance || "").trim();
+  const sessionId = req.body.session?.session_id || "default_session";
   const apiKey = process.env.GEMINI_API_KEY;
 
-  if (!userText || userText.trim() === "") {
+  if (!userText) {
     return res.status(200).json({
       version: req.body.version,
       session: req.body.session,
@@ -29,101 +78,108 @@ module.exports = async (req, res) => {
       version: req.body.version,
       session: req.body.session,
       response: {
-        text: "Ошибка: переменная GEMINI_API_KEY не задана в Vercel.",
+        text: "Ошибка: не задан ключ GEMINI_API_KEY в Vercel.",
         end_session: false
       }
     });
   }
 
-  // Лимит ожидания 2.6 сек, чтобы Яндекс не показал красный баннер ошибки
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2600);
+  const lowerText = userText.toLowerCase();
+  const isFollowUp = ["дальше", "готово", "ну что", "продолжай", "ответ", "да", "ага"].includes(lowerText);
+  const existingTask = cache.get(sessionId);
 
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: userText
-                }
-              ]
-            }
-          ],
-          systemInstruction: {
-            parts: [
-              {
-                text: "Отвечай кратко, 1-2 предложениями, разговорным языком без markdown и звездочек."
-              }
-            ]
-          },
-          generationConfig: {
-            maxOutputTokens: 80,
-            temperature: 0.7,
-            thinkingConfig: {
-              thinkingBudget: 0
-            }
-          }
-        })
-      }
-    );
-
-    clearTimeout(timeoutId);
-    const data = await response.json();
-
-    let reply = "";
-
-    if (data.error) {
-      reply = `Ошибка Google: ${data.error.message || JSON.stringify(data.error)}`;
-    } else if (data.candidates?.[0]?.content?.parts) {
-      const parts = data.candidates[0].content.parts;
-      const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
-      reply = textPart ? textPart.text : "Ответ пуст.";
-    } else {
-      reply = `Неожиданный ответ: ${JSON.stringify(data).slice(0, 150)}`;
-    }
-
-    reply = reply.replace(/[*#_`]/g, "").trim();
-
-    if (reply.length > 950) {
-      reply = reply.slice(0, 950) + "...";
-    }
-
-    return res.status(200).json({
-      version: req.body.version,
-      session: req.body.session,
-      response: {
-        text: reply,
-        end_session: false
-      }
-    });
-  } catch (err) {
-    clearTimeout(timeoutId);
-
-    if (err.name === "AbortError") {
+  // 2. Если пользователь просит дослушать отложенный ответ ("дальше")
+  if (isFollowUp && existingTask) {
+    if (existingTask.status === "done") {
+      cache.delete(sessionId);
       return res.status(200).json({
         version: req.body.version,
         session: req.body.session,
         response: {
-          text: "Нейросеть не успела ответить за 3 секунды. Повторите запрос еще раз.",
+          text: existingTask.reply,
+          end_session: false
+        }
+      });
+    } else {
+      // Если ответ еще доделывается, ждем его еще до 2.2 сек
+      const timeoutPromise = new Promise(resolve => setTimeout(() => resolve("TIMEOUT"), 2200));
+      const result = await Promise.race([existingTask.promise, timeoutPromise]);
+
+      if (result !== "TIMEOUT") {
+        cache.delete(sessionId);
+        return res.status(200).json({
+          version: req.body.version,
+          session: req.body.session,
+          response: {
+            text: result,
+            end_session: false
+          }
+        });
+      }
+
+      return res.status(200).json({
+        version: req.body.version,
+        session: req.body.session,
+        response: {
+          text: "Еще буквально секунду, скажите: дальше.",
           end_session: false
         }
       });
     }
+  }
 
+  // 3. Запускаем новый запрос к Gemini
+  const taskRecord = { status: "pending", reply: null, promise: null };
+
+  const geminiPromise = askGemini(userText, apiKey)
+    .then(reply => {
+      taskRecord.status = "done";
+      taskRecord.reply = reply;
+      return reply;
+    })
+    .catch(err => {
+      const errText = `Сбой связи: ${err.message}`;
+      taskRecord.status = "done";
+      taskRecord.reply = errText;
+      return errText;
+    });
+
+  taskRecord.promise = geminiPromise;
+  cache.set(sessionId, taskRecord);
+
+  // Не даем Vercel "убить" фоновый процесс после отправки промежуточного ответа Яндексу
+  try {
+    const { waitUntil } = require("@vercel/functions");
+    if (waitUntil) waitUntil(geminiPromise);
+  } catch (e) {
+    // В стандартной среде Node на Vercel промис продолжает жить в теплом инстансе
+  }
+
+  // Гонка: ждем ответ от Google максимум 2.35 секунды
+  const timeoutPromise = new Promise(resolve => setTimeout(() => resolve("TIMEOUT"), 2350));
+  const raceResult = await Promise.race([geminiPromise, timeoutPromise]);
+
+  // Вариант А: Нейросеть успела ответить за 2.35 сек — отдаем ответ сразу!
+  if (raceResult !== "TIMEOUT") {
+    cache.delete(sessionId);
     return res.status(200).json({
       version: req.body.version,
       session: req.body.session,
       response: {
-        text: `Сбой сервера: ${err.message}`,
+        text: raceResult,
         end_session: false
       }
     });
   }
+
+  // Вариант Б: Нейросеть думает дольше 2.35 сек — успокаиваем Яндекс, а ответ дозревает в фоне
+  return res.status(200).json({
+    version: req.body.version,
+    session: req.body.session,
+    response: {
+      text: "Генерирую ответ... Скажите «дальше» через секунду.",
+      buttons: [{ title: "Дальше", hide: true }],
+      end_session: false
+    }
+  });
 };
