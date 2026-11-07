@@ -1,5 +1,5 @@
 module.exports = async (req, res) => {
-  // Пинги и пустые запросы
+  // Пинги и пустые вызовы от Яндекса
   if (!req.body || !req.body.request) {
     return res.status(200).json({
       version: "1.0",
@@ -29,15 +29,15 @@ module.exports = async (req, res) => {
       version: req.body.version,
       session: req.body.session,
       response: {
-        text: "Ошибка: переменная GEMINI_API_KEY не задана в настройках Vercel.",
+        text: "Ошибка: переменная GEMINI_API_KEY не задана в Vercel.",
         end_session: false
       }
     });
   }
 
-  // Ограничиваем ожидание от Google 2.4 секундами, чтобы успеть отдать ответ Яндексу
+  // Лимит ожидания 2.6 сек, чтобы Яндекс не показал красный баннер ошибки
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2400);
+  const timeoutId = setTimeout(() => controller.abort(), 2600);
 
   try {
     const response = await fetch(
@@ -51,13 +51,20 @@ module.exports = async (req, res) => {
             {
               parts: [
                 {
-                  text: `Ответь максимально кратко, одно-два предложения, разговорным языком: ${userText}`
+                  text: userText
                 }
               ]
             }
           ],
+          systemInstruction: {
+            parts: [
+              {
+                text: "Отвечай кратко, 1-2 предложениями, разговорным языком без markdown и звездочек."
+              }
+            ]
+          },
           generationConfig: {
-            maxOutputTokens: 120,
+            maxOutputTokens: 80,
             temperature: 0.7,
             thinkingConfig: {
               thinkingBudget: 0
@@ -77,9 +84,9 @@ module.exports = async (req, res) => {
     } else if (data.candidates?.[0]?.content?.parts) {
       const parts = data.candidates[0].content.parts;
       const textPart = parts.find(p => p.text && !p.thought) || parts.find(p => p.text);
-      reply = textPart ? textPart.text : "Ответ от нейросети пуст.";
+      reply = textPart ? textPart.text : "Ответ пуст.";
     } else {
-      reply = `Неожиданный ответ Google: ${JSON.stringify(data).slice(0, 150)}`;
+      reply = `Неожиданный ответ: ${JSON.stringify(data).slice(0, 150)}`;
     }
 
     reply = reply.replace(/[*#_`]/g, "").trim();
@@ -99,13 +106,12 @@ module.exports = async (req, res) => {
   } catch (err) {
     clearTimeout(timeoutId);
 
-    // Если сработал таймаут 2.4 секунды
     if (err.name === "AbortError") {
       return res.status(200).json({
         version: req.body.version,
         session: req.body.session,
         response: {
-          text: "Нейросеть задумалась дольше 3 секунд. Попробуйте спросить еще раз короче.",
+          text: "Нейросеть не успела ответить за 3 секунды. Повторите запрос еще раз.",
           end_session: false
         }
       });
