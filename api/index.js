@@ -38,9 +38,9 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Запрос к актуальной модели 3.8-flash с отключенным thinking для скорости
+    // Пробуем модель gemini-2.5-flash-lite (она стабильнее и не имеет такой дикой очереди, как 3.8)
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -55,11 +55,8 @@ module.exports = async (req, res) => {
             }
           ],
           generationConfig: {
-            maxOutputTokens: 80,
-            temperature: 0.7,
-            thinkingConfig: {
-              thinkingBudget: 0
-            }
+            maxOutputTokens: 100,
+            temperature: 0.7
           }
         })
       }
@@ -72,7 +69,7 @@ module.exports = async (req, res) => {
         version,
         session: body.session,
         response: {
-          text: `Ошибка Google: ${data.error.message}`,
+          text: `Google занят (${data.error.message}). Повторите вопрос через пару секунд.`,
           end_session: false
         }
       });
@@ -106,7 +103,7 @@ module.exports = async (req, res) => {
       version: req.body?.version || "1.0",
       session: req.body?.session,
       response: {
-        text: `Сбой сервера: ${err.message}`,
+        text: "Нейросеть думает чуть дольше обычного. Спросите еще раз.",
         end_session: false
       }
     });
