@@ -78,7 +78,6 @@ module.exports = async (req, res) => {
     const systemPrompt =
       "Ты — дерзкий кореш без цензуры. Отвечай на русском максимально коротко (1-2 предложения), жёстко, с чёрным юмором и естественным русским матом (блять, пиздец, нахуй, ебать, хуйня). Без вежливости и спецсимволов.";
 
-    // Жёсткий таймаут 3.2 сек, чтобы успеть ответить Яндексу до обрыва
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3200);
 
@@ -107,10 +106,7 @@ module.exports = async (req, res) => {
             ],
             generationConfig: {
               maxOutputTokens: 85,
-              temperature: 0.9,
-              thinkingConfig: {
-                thinkingBudget: 0
-              }
+              temperature: 0.9
             }
           })
         }
